@@ -628,19 +628,54 @@ def check_for_signals(symbol=None):
         if not current_price:
             logger.error("Failed to get current price from WebSocket")
             return
+        
+        logger.info(f"Current price for {symbol}: {current_price}")
             
         position = binance_client.get_position_info(symbol)
         position_amount = position['position_amount'] if position else 0
         
-        signal = strategy.get_signal(klines)
+        logger.info(f"Current position amount: {position_amount}")
         
+        signal = strategy.get_signal(klines)
+        logger.info(f"Strategy signal: {signal}")
+        
+        # Verify bot status before proceeding with trades
+        if not binance_client:
+            logger.error("Binance client not initialized. Cannot place trades.")
+            return
+            
         if signal == "BUY" and position_amount <= 0:
+            # Handle SHORT → LONG transition
             if position_amount < 0:
-                logger.info("Closing existing short position before going long")
-                # Cancel only position-related orders instead of all orders
-                binance_client.cancel_position_orders(symbol)
-                binance_client.place_market_order(symbol, "BUY", abs(position_amount))
+                logger.info(f"POSITION TRANSITION: Closing existing SHORT position ({position_amount}) before going LONG")
                 
+                # Cancel existing orders first
+                cancelled = binance_client.cancel_position_orders(symbol)
+                logger.info(f"Cancelled {cancelled} existing position orders")
+                time.sleep(0.5)  # Small delay to ensure orders are cancelled
+                
+                # Close short position with market order
+                close_amount = abs(position_amount)
+                logger.info(f"Placing BUY order to close SHORT position: {close_amount} {symbol}")
+                close_order = binance_client.place_market_order(symbol, "BUY", close_amount)
+                
+                if close_order:
+                    order_id = close_order.get('orderId', 'unknown')
+                    logger.info(f"✅ Successfully closed SHORT position with order ID: {order_id}")
+                    
+                    # Check if position was actually closed (sometimes there can be a delay)
+                    time.sleep(1)  # Wait a moment for the order to process
+                    position = binance_client.get_position_info(symbol)
+                    if position and abs(position['position_amount']) > 0.0001:  # Using a small threshold
+                        logger.warning(f"⚠️ Position not fully closed. Remaining: {position['position_amount']}. Trying again...")
+                        remaining = abs(position['position_amount'])
+                        binance_client.place_market_order(symbol, "BUY", remaining)
+                        time.sleep(1)  # Wait for the second attempt to process
+                else:
+                    logger.error("❌ Failed to close SHORT position! Cannot proceed with opening LONG position.")
+                    return
+            
+            # Check if we should open a new position
             if risk_manager.should_open_position(symbol):
                 stop_loss_price = risk_manager.calculate_stop_loss(symbol, "BUY", current_price)
                 
@@ -648,29 +683,82 @@ def check_for_signals(symbol=None):
                     symbol, "BUY", current_price, stop_loss_price
                 )
                 
-                if quantity > 0:
-                    order = binance_client.place_market_order(symbol, "BUY", quantity)
-                    if order:
-                        logger.info(f"Opened long position: {quantity} {symbol} at {current_price}")
+                logger.info(f"Calculated position size for BUY: {quantity} at price {current_price}")
+                
+                if quantity <= 0:
+                    logger.warning(f"⚠️ Calculated quantity is too small or zero: {quantity}. Not placing BUY order.")
+                    return
+                
+                # Place the market order to open long position
+                logger.info(f"Placing LONG position: {quantity} {symbol} at ~{current_price}")
+                order = binance_client.place_market_order(symbol, "BUY", quantity)
+                
+                if order:
+                    order_id = order.get('orderId', 'unknown')
+                    logger.info(f"✅ Successfully opened LONG position with order ID: {order_id}")
+                    
+                    # Verify the position was opened
+                    time.sleep(1)  # Wait for the order to be processed
+                    new_position = binance_client.get_position_info(symbol)
+                    if new_position and new_position['position_amount'] > 0:
+                        logger.info(f"Position verification successful. Amount: {new_position['position_amount']}")
                         
+                        # Place protective stop loss
                         if stop_loss_price:
-                            binance_client.place_stop_loss_order(
-                                symbol, "SELL", quantity, stop_loss_price
+                            sl_order = binance_client.place_stop_loss_order(
+                                symbol, "SELL", new_position['position_amount'], stop_loss_price
                             )
+                            if sl_order:
+                                logger.info(f"✅ Stop loss placed at {stop_loss_price}")
+                            else:
+                                logger.error(f"❌ Failed to place stop loss at {stop_loss_price}")
                             
+                        # Place take profit
                         take_profit_price = risk_manager.calculate_take_profit(symbol, "BUY", current_price)
                         if take_profit_price:
-                            binance_client.place_take_profit_order(
-                                symbol, "SELL", quantity, take_profit_price
+                            tp_order = binance_client.place_take_profit_order(
+                                symbol, "SELL", new_position['position_amount'], take_profit_price
                             )
+                            if tp_order:
+                                logger.info(f"✅ Take profit placed at {take_profit_price}")
+                            else:
+                                logger.error(f"❌ Failed to place take profit at {take_profit_price}")
+                    else:
+                        logger.warning("⚠️ Position verification failed after BUY order. Check position manually.")
+                else:
+                    logger.error("❌ Failed to place BUY order to open position")
                     
         elif signal == "SELL" and position_amount >= 0:
+            # Handle LONG → SHORT transition
             if position_amount > 0:
-                logger.info("Closing existing long position before going short")
-                # Cancel only position-related orders instead of all orders
-                binance_client.cancel_position_orders(symbol)
-                binance_client.place_market_order(symbol, "SELL", position_amount)
+                logger.info(f"POSITION TRANSITION: Closing existing LONG position ({position_amount}) before going SHORT")
                 
+                # Cancel existing orders first
+                cancelled = binance_client.cancel_position_orders(symbol)
+                logger.info(f"Cancelled {cancelled} existing position orders")
+                time.sleep(0.5)  # Small delay to ensure orders are cancelled
+                
+                # Close long position with market order
+                logger.info(f"Placing SELL order to close LONG position: {position_amount} {symbol}")
+                close_order = binance_client.place_market_order(symbol, "SELL", position_amount)
+                
+                if close_order:
+                    order_id = close_order.get('orderId', 'unknown')
+                    logger.info(f"✅ Successfully closed LONG position with order ID: {order_id}")
+                    
+                    # Check if position was actually closed (sometimes there can be a delay)
+                    time.sleep(1)  # Wait a moment for the order to process
+                    position = binance_client.get_position_info(symbol)
+                    if position and position['position_amount'] > 0.0001:  # Using a small threshold
+                        logger.warning(f"⚠️ Position not fully closed. Remaining: {position['position_amount']}. Trying again...")
+                        remaining = position['position_amount']
+                        binance_client.place_market_order(symbol, "SELL", remaining)
+                        time.sleep(1)  # Wait for the second attempt to process
+                else:
+                    logger.error("❌ Failed to close LONG position! Cannot proceed with opening SHORT position.")
+                    return
+                
+            # Check if we should open a new position
             if risk_manager.should_open_position(symbol):
                 stop_loss_price = risk_manager.calculate_stop_loss(symbol, "SELL", current_price)
                 
@@ -678,22 +766,52 @@ def check_for_signals(symbol=None):
                     symbol, "SELL", current_price, stop_loss_price
                 )
                 
-                if quantity > 0:
-                    order = binance_client.place_market_order(symbol, "SELL", quantity)
-                    if order:
-                        logger.info(f"Opened short position: {quantity} {symbol} at {current_price}")
+                logger.info(f"Calculated position size for SELL: {quantity} at price {current_price}")
+                
+                if quantity <= 0:
+                    logger.warning(f"⚠️ Calculated quantity is too small or zero: {quantity}. Not placing SELL order.")
+                    return
+                
+                # Place the market order to open short position
+                logger.info(f"Placing SHORT position: {quantity} {symbol} at ~{current_price}")
+                order = binance_client.place_market_order(symbol, "SELL", quantity)
+                
+                if order:
+                    order_id = order.get('orderId', 'unknown')
+                    logger.info(f"✅ Successfully opened SHORT position with order ID: {order_id}")
+                    
+                    # Verify the position was opened
+                    time.sleep(1)  # Wait for the order to be processed
+                    new_position = binance_client.get_position_info(symbol)
+                    if new_position and new_position['position_amount'] < 0:
+                        logger.info(f"Position verification successful. Amount: {new_position['position_amount']}")
                         
+                        # Place protective stop loss
                         if stop_loss_price:
-                            binance_client.place_stop_loss_order(
-                                symbol, "BUY", quantity, stop_loss_price
+                            sl_order = binance_client.place_stop_loss_order(
+                                symbol, "BUY", abs(new_position['position_amount']), stop_loss_price
                             )
-                            
+                            if sl_order:
+                                logger.info(f"✅ Stop loss placed at {stop_loss_price}")
+                            else:
+                                logger.error(f"❌ Failed to place stop loss at {stop_loss_price}")
+                        
+                        # Place take profit
                         take_profit_price = risk_manager.calculate_take_profit(symbol, "SELL", current_price)
                         if take_profit_price:
-                            binance_client.place_take_profit_order(
-                                symbol, "BUY", quantity, take_profit_price
+                            tp_order = binance_client.place_take_profit_order(
+                                symbol, "BUY", abs(new_position['position_amount']), take_profit_price
                             )
+                            if tp_order:
+                                logger.info(f"✅ Take profit placed at {take_profit_price}")
+                            else:
+                                logger.error(f"❌ Failed to place take profit at {take_profit_price}")
+                    else:
+                        logger.warning("⚠️ Position verification failed after SELL order. Check position manually.")
+                else:
+                    logger.error("❌ Failed to place SELL order to open position")
         
+        # Handle trailing stops and take profits for existing positions
         if position and abs(position['position_amount']) > 0:
             side = "BUY" if position['position_amount'] > 0 else "SELL"
             opposite_side = "SELL" if side == "BUY" else "BUY"
@@ -711,26 +829,34 @@ def check_for_signals(symbol=None):
             if new_stop or new_take_profit:
                 # Cancel all existing orders first
                 binance_client.cancel_all_open_orders(symbol)
+                time.sleep(0.5)  # Small delay to ensure orders are cancelled
                 
                 # Always place new stop loss
                 stop_loss_price = new_stop if new_stop else risk_manager.calculate_stop_loss(symbol, side, current_price)
-                binance_client.place_stop_loss_order(
+                sl_order = binance_client.place_stop_loss_order(
                     symbol, opposite_side, abs(position['position_amount']), stop_loss_price
                 )
+                if sl_order:
+                    if new_stop:
+                        logger.info(f"Updated trailing stop loss to {stop_loss_price}")
+                else:
+                    logger.error(f"Failed to update stop loss order at {stop_loss_price}")
                 
                 # Always place new take profit
                 take_profit_price = new_take_profit if new_take_profit else risk_manager.calculate_take_profit(symbol, side, current_price)
-                binance_client.place_take_profit_order(
+                tp_order = binance_client.place_take_profit_order(
                     symbol, opposite_side, abs(position['position_amount']), take_profit_price
                 )
-                
-                if new_stop:
-                    logger.info(f"Updated trailing stop loss to {stop_loss_price}")
-                if new_take_profit:
-                    logger.info(f"Updated trailing take profit to {take_profit_price}")
+                if tp_order:
+                    if new_take_profit:
+                        logger.info(f"Updated trailing take profit to {take_profit_price}")
+                else:
+                    logger.error(f"Failed to update take profit order at {take_profit_price}")
     
     except Exception as e:
         logger.error(f"Error in trading cycle: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
 
 
 def generate_performance_report():
@@ -1523,8 +1649,10 @@ def main():
     parser.add_argument('--interval', type=int, default=5, help='Trading check interval in minutes')
     parser.add_argument('--skip-validation', action='store_true', help='Skip strategy validation before live trading')
     parser.add_argument('--skip-test-trade', action='store_true', help='Skip test trade before live trading')
+    # Keep the --small-account flag for backward compatibility but make it optional
     parser.add_argument('--small-account', action='store_true', help='Run with small account (under $45) - skips test trade and uses adjusted risk')
     parser.add_argument('--force-balance', action='store_true', help='Force initialization of balance from config file')
+    parser.add_argument('--test-trade', action='store_true', help='Run test trade and exit')
     args = parser.parse_args()
     
     signal.signal(signal.SIGINT, handle_exit)
@@ -1556,10 +1684,36 @@ def main():
         generate_performance_report()
         return
     
-    # For small accounts, automatically skip test trade
-    if args.small_account:
-        args.skip_test_trade = True
-        logger.info("Small account mode: Test trade will be skipped")
+    if args.test_trade:
+        setup()
+        perform_test_trade(args.symbol or TRADING_SYMBOL)
+        return
+    
+    # Initialize basic setup to check account balance
+    try:
+        global binance_client
+        binance_client = BinanceClient()
+        logger.info("Binance client initialized for initial balance check")
+    except Exception as e:
+        logger.error(f"Failed to initialize Binance client for balance check: {e}")
+        exit(1)
+    
+    # Auto-detect small account
+    try:
+        initial_balance = binance_client.get_account_balance()
+        is_small_account = initial_balance < 100.0
+        
+        # Apply small account settings if detected OR explicitly flagged
+        if is_small_account or args.small_account:
+            if is_small_account:
+                logger.info(f"Small account automatically detected (${initial_balance:.2f})")
+            # Skip test trade for small accounts to save on fees
+            args.skip_test_trade = True
+            logger.info("Small account mode enabled: Test trade will be skipped")
+    except Exception as e:
+        logger.error(f"Failed to check account balance: {e}")
+        logger.warning("Continuing without small account detection")
+        # If we can't check balance, we don't modify any settings
     
     # Run safety backtest before starting live trading
     if BACKTEST_BEFORE_LIVE and not args.skip_validation:
@@ -1575,28 +1729,28 @@ def main():
             logger.error("Use --skip-validation to bypass this check")
             return
     
-    setup()
+    # Complete setup if not already done
+    if not hasattr(main, 'setup_complete') or not main.setup_complete:
+        setup()
+        main.setup_complete = True
     
     # Force initialize state file if requested
     if args.force_balance:
         initialize_state_file(force=True)
     
-    # Check balance for very small accounts
+    # Check balance again for very small accounts (after full setup)
     initial_balance = binance_client.get_account_balance()
-    if initial_balance < 45.0 and not args.small_account:
-        logger.warning(f"Account balance is very low: {initial_balance} USDT")
-        logger.warning("For accounts under $45, use --small-account flag to adjust settings")
-        if initial_balance < 5.0:
-            logger.error("Account balance is too low to trade effectively. Please deposit funds.")
-            return
+    if initial_balance < 5.0:
+        logger.error(f"Account balance is extremely low: {initial_balance:.6f} USDT")
+        logger.error("Account balance is too low to trade effectively. Please deposit funds.")
+        return
     
     # Perform a test trade before starting live trading
     if not args.skip_test_trade:
         logger.info("Running test trade before starting live trading")
-        if not perform_test_trade():
+        if not perform_test_trade(args.symbol or TRADING_SYMBOL):
             logger.error("Test trade failed. Aborting live trading.")
             logger.error("Use --skip-test-trade to bypass this check")
-            logger.error("For small accounts (under $45), use --small-account flag")
             return
     
     loaded_stats = load_state()

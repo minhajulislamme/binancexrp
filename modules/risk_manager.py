@@ -71,8 +71,16 @@ class RiskManager:
             logger.error(f"Could not retrieve symbol info for {symbol}")
             return 0
             
-        # Calculate risk amount
-        risk_amount = balance * RISK_PER_TRADE
+        # Calculate risk amount - use higher risk for small accounts
+        small_account = balance < 100.0  # Consider accounts under $100 as small
+        
+        # Adjust risk per trade for small accounts - more aggressive but safer than no trades
+        effective_risk = RISK_PER_TRADE
+        if small_account:
+            effective_risk = max(RISK_PER_TRADE, 0.05)  # Minimum 5% risk for small accounts
+            logger.info(f"Small account detected (${balance:.2f}). Using {effective_risk*100:.1f}% risk per trade.")
+            
+        risk_amount = balance * effective_risk
         
         # Calculate position size based on risk and stop loss
         if stop_loss_price and USE_STOP_LOSS:
@@ -87,7 +95,7 @@ class RiskManager:
         else:
             # If no stop loss, use a percentage of balance with leverage
             leverage = self.get_current_leverage(symbol)
-            max_quantity = (balance * RISK_PER_TRADE * leverage) / price
+            max_quantity = (balance * effective_risk * leverage) / price
         
         # Apply precision to quantity
         quantity_precision = symbol_info['quantity_precision']
@@ -97,12 +105,34 @@ class RiskManager:
         min_notional = symbol_info['min_notional']
         if quantity * price < min_notional:
             logger.warning(f"Position size too small - below minimum notional of {min_notional}")
-            if min_notional / price <= max_quantity:
-                quantity = math.ceil(min_notional / price * 10**quantity_precision) / 10**quantity_precision
-                logger.info(f"Adjusted position size to meet minimum notional: {quantity}")
+            
+            # For small accounts, force minimum notional even if it exceeds normal risk parameters
+            if small_account:
+                min_quantity = math.ceil(min_notional / price * 10**quantity_precision) / 10**quantity_precision
+                
+                # Make sure we don't use more than 50% of balance for very small accounts
+                max_safe_quantity = (balance * 0.5 * leverage) / price
+                max_safe_quantity = math.floor(max_safe_quantity * 10**quantity_precision) / 10**quantity_precision
+                
+                quantity = min(min_quantity, max_safe_quantity)
+                
+                if quantity * price / leverage > balance * 0.5:
+                    logger.warning("Position would use more than 50% of balance - reducing size")
+                    quantity = math.floor((balance * 0.5 * leverage / price) * 10**quantity_precision) / 10**quantity_precision
+                
+                if quantity > 0:
+                    logger.info(f"Small account: Adjusted position size to meet minimum notional: {quantity}")
+                else:
+                    logger.error("Balance too low to open even minimum position")
+                    return 0
             else:
-                logger.error(f"Cannot meet minimum notional with current risk settings")
-                return 0
+                # Normal account handling
+                if min_notional / price <= max_quantity:
+                    quantity = math.ceil(min_notional / price * 10**quantity_precision) / 10**quantity_precision
+                    logger.info(f"Adjusted position size to meet minimum notional: {quantity}")
+                else:
+                    logger.error(f"Cannot meet minimum notional with current risk settings")
+                    return 0
                 
         logger.info(f"Calculated position size: {quantity} units at {price} per unit")
         return quantity

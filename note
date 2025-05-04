@@ -74,6 +74,13 @@ cd /home/minhajulislam/binancebot && python3 backtest_all_coins.py --days 30 --c
 
 cd /home/minhajulislam/binancebot && python3 main.py --backtest --symbol XRPUSDT --timeframe 15m --strategy XRPDynamicGrid --start-date "30 days ago"
 
+python3 main.py --backtest --symbol SOLUSDT --timeframe 15m --strategy XRPDynamicGrid --start-date "30 days ago"
 
 
-cd /home/minhajulislam/binancebot-xrp && python3 main.py --backtest --symbol XRPUSDT --timeframe 15m --strategy XRPDynamicGrid --start-date "30 days ago"
+check my main .py than tell me now to excute trade like one positon buy close and other position open sell and sell close open buy
+
+
+
+but i get notification but not place position
+
+--test-trade
