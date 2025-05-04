@@ -6,6 +6,7 @@ import signal
 import schedule
 import argparse
 import json
+import traceback
 from datetime import datetime, timedelta
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -537,7 +538,19 @@ def on_order_update(order_data):
                 elif realized_profit < 0:
                     stats['losing_trades'] += 1
                     logger.info(f"💸💸💸 LOSS: {realized_profit:.2f} USDT 💸💸💸")
+                
+                # Get additional trade context
+                signal_reason = "Unknown"
+                market_condition = "Unknown"
+                if risk_manager and hasattr(risk_manager, 'current_market_condition'):
+                    market_condition = risk_manager.current_market_condition or "Unknown"
                     
+                # Try to get strategy name
+                strategy_name = STRATEGY
+                if strategy and hasattr(strategy, 'strategy_name'):
+                    strategy_name = strategy.strategy_name
+                    
+                # Store extended trade data
                 trade_data = {
                     'symbol': symbol,
                     'side': side,
@@ -547,7 +560,10 @@ def on_order_update(order_data):
                     'commission': order_data['commission'],
                     'commission_asset': order_data['commission_asset'],
                     'timestamp': datetime.now().isoformat(),
-                    'balance': stats['current_balance']
+                    'balance': stats['current_balance'],
+                    'market_condition': market_condition,
+                    'strategy': strategy_name,
+                    'execution_type': order_type
                 }
                 
                 save_trade(trade_data)
@@ -574,6 +590,10 @@ def on_order_update(order_data):
                           f"Side: {side}\n" \
                           f"Quantity: {filled_qty}\n" \
                           f"Price: {price}\n"
+                
+                # Add market condition and strategy info
+                message += f"Strategy: {strategy_name}\n" \
+                          f"Market Condition: {market_condition}\n"
                           
                 # Add profit/loss info if applicable
                 if realized_profit > 0:
@@ -591,6 +611,37 @@ def on_order_update(order_data):
                 ws_status = "Connected" if websocket_manager and websocket_manager.is_connected() else "Disconnected"
                 message += f"\n*Connection Status:*\n" \
                           f"WebSocket: {ws_status}"
+                
+                notifier.send_message(message)
+                
+                # For significant trades (profit/loss over certain threshold), send a chart
+                try:
+                    significant_threshold = current_balance * 0.02  # 2% of balance
+                    if abs(realized_profit) >= significant_threshold:
+                        # Generate and send a trade chart for significant trades
+                        chart_path = generate_trade_chart(symbol, side, price, realized_profit)
+                        if chart_path:
+                            caption = f"Trade Chart: {symbol} {side} @ {price}"
+                            notifier.send_photo(chart_path, caption)
+                except Exception as chart_error:
+                    logger.error(f"Error generating trade chart: {chart_error}")
+                    
+            elif order_type in ['STOP_MARKET', 'TAKE_PROFIT_MARKET']:
+                # For stop loss or take profit orders, send a special notification
+                event_type = "Stop Loss" if order_type == 'STOP_MARKET' else "Take Profit"
+                
+                # Calculate profit/loss if available
+                profit_loss_msg = ""
+                if 'realized_profit' in order_data and order_data['realized_profit'] != 0:
+                    profit = order_data['realized_profit']
+                    profit_loss_msg = f"P/L: {'+' if profit > 0 else ''}{profit:.2f} USDT"
+                
+                notifier = TelegramNotifier()
+                message = f"{'⚠️' if order_type == 'STOP_MARKET' else '🎯'} *{event_type} Triggered*\n\n" \
+                         f"Symbol: {symbol}\n" \
+                         f"Price: {price}\n" \
+                         f"Size: {filled_qty}\n" \
+                         f"{profit_loss_msg}"
                 
                 notifier.send_message(message)
         else:
@@ -703,26 +754,44 @@ def check_for_signals(symbol=None):
                     if new_position and new_position['position_amount'] > 0:
                         logger.info(f"Position verification successful. Amount: {new_position['position_amount']}")
                         
-                        # Place protective stop loss
+                        entry_price = float(new_position.get('entry_price', current_price))
+                        
+                        # Get recent klines for volatility calculation
+                        recent_klines = klines_data.get(symbol, [])[-30:] if klines_data.get(symbol) else None
+                        
+                        # Place protective stop loss using volatility-based calculation
+                        stop_loss_price = risk_manager.calculate_volatility_based_stop_loss(
+                            symbol, "BUY", entry_price, recent_klines
+                        )
+                        
                         if stop_loss_price:
                             sl_order = binance_client.place_stop_loss_order(
                                 symbol, "SELL", new_position['position_amount'], stop_loss_price
                             )
                             if sl_order:
-                                logger.info(f"✅ Stop loss placed at {stop_loss_price}")
+                                logger.info(f"✅ Volatility-based stop loss placed at {stop_loss_price}")
                             else:
                                 logger.error(f"❌ Failed to place stop loss at {stop_loss_price}")
-                            
-                        # Place take profit
-                        take_profit_price = risk_manager.calculate_take_profit(symbol, "BUY", current_price)
-                        if take_profit_price:
-                            tp_order = binance_client.place_take_profit_order(
-                                symbol, "SELL", new_position['position_amount'], take_profit_price
-                            )
-                            if tp_order:
-                                logger.info(f"✅ Take profit placed at {take_profit_price}")
-                            else:
-                                logger.error(f"❌ Failed to place take profit at {take_profit_price}")
+                        
+                        # Place partial take profits instead of a single take profit
+                        tp_orders = place_partial_take_profits(
+                            symbol, "BUY", new_position['position_amount'], entry_price, new_position
+                        )
+                        
+                        if tp_orders:
+                            logger.info(f"✅ Successfully placed {len(tp_orders)} partial take profit orders")
+                        else:
+                            # Fallback to regular take profit if partial TP failed
+                            logger.warning("⚠️ Partial take profits failed, trying regular take profit")
+                            take_profit_price = risk_manager.calculate_take_profit(symbol, "BUY", entry_price)
+                            if take_profit_price:
+                                tp_order = binance_client.place_take_profit_order(
+                                    symbol, "SELL", new_position['position_amount'], take_profit_price
+                                )
+                                if tp_order:
+                                    logger.info(f"✅ Take profit placed at {take_profit_price}")
+                                else:
+                                    logger.error(f"❌ Failed to place take profit at {take_profit_price}")
                     else:
                         logger.warning("⚠️ Position verification failed after BUY order. Check position manually.")
                 else:
@@ -786,26 +855,44 @@ def check_for_signals(symbol=None):
                     if new_position and new_position['position_amount'] < 0:
                         logger.info(f"Position verification successful. Amount: {new_position['position_amount']}")
                         
-                        # Place protective stop loss
+                        entry_price = float(new_position.get('entry_price', current_price))
+                        
+                        # Get recent klines for volatility calculation
+                        recent_klines = klines_data.get(symbol, [])[-30:] if klines_data.get(symbol) else None
+                        
+                        # Place protective stop loss using volatility-based calculation
+                        stop_loss_price = risk_manager.calculate_volatility_based_stop_loss(
+                            symbol, "SELL", entry_price, recent_klines
+                        )
+                        
                         if stop_loss_price:
                             sl_order = binance_client.place_stop_loss_order(
                                 symbol, "BUY", abs(new_position['position_amount']), stop_loss_price
                             )
                             if sl_order:
-                                logger.info(f"✅ Stop loss placed at {stop_loss_price}")
+                                logger.info(f"✅ Volatility-based stop loss placed at {stop_loss_price}")
                             else:
                                 logger.error(f"❌ Failed to place stop loss at {stop_loss_price}")
                         
-                        # Place take profit
-                        take_profit_price = risk_manager.calculate_take_profit(symbol, "SELL", current_price)
-                        if take_profit_price:
-                            tp_order = binance_client.place_take_profit_order(
-                                symbol, "BUY", abs(new_position['position_amount']), take_profit_price
-                            )
-                            if tp_order:
-                                logger.info(f"✅ Take profit placed at {take_profit_price}")
-                            else:
-                                logger.error(f"❌ Failed to place take profit at {take_profit_price}")
+                        # Place partial take profits instead of a single take profit
+                        tp_orders = place_partial_take_profits(
+                            symbol, "SELL", abs(new_position['position_amount']), entry_price, new_position
+                        )
+                        
+                        if tp_orders:
+                            logger.info(f"✅ Successfully placed {len(tp_orders)} partial take profit orders")
+                        else:
+                            # Fallback to regular take profit if partial TP failed
+                            logger.warning("⚠️ Partial take profits failed, trying regular take profit")
+                            take_profit_price = risk_manager.calculate_take_profit(symbol, "SELL", entry_price)
+                            if take_profit_price:
+                                tp_order = binance_client.place_take_profit_order(
+                                    symbol, "BUY", abs(new_position['position_amount']), take_profit_price
+                                )
+                                if tp_order:
+                                    logger.info(f"✅ Take profit placed at {take_profit_price}")
+                                else:
+                                    logger.error(f"❌ Failed to place take profit at {take_profit_price}")
                     else:
                         logger.warning("⚠️ Position verification failed after SELL order. Check position manually.")
                 else:
@@ -1644,6 +1731,184 @@ def perform_test_trade(symbol=TRADING_SYMBOL):
             pass
         
         return False
+
+def place_partial_take_profits(symbol, side, quantity, entry_price, position_info=None):
+    """
+    Place multiple take profit orders at different levels
+    
+    Args:
+        symbol: Symbol to trade
+        side: The position side ('BUY' or 'SELL')
+        quantity: The position size
+        entry_price: The entry price of the position
+        position_info: Optional position info object
+        
+    Returns:
+        List of placed take profit orders
+    """
+    logger.info(f"Setting up partial take profits for {symbol}")
+    
+    # Get partial take profit levels
+    take_profit_levels = risk_manager.calculate_partial_take_profits(symbol, side, entry_price)
+    
+    if not take_profit_levels:
+        logger.warning(f"No partial take profit levels returned. Using standard TP.")
+        take_profit_price = risk_manager.calculate_take_profit(symbol, side, entry_price)
+        if take_profit_price:
+            order = binance_client.place_take_profit_order(
+                symbol=symbol, 
+                side="SELL" if side == "BUY" else "BUY",  # Opposite side for closing
+                quantity=quantity, 
+                stop_price=take_profit_price
+            )
+            return [order] if order else []
+        return []
+    
+    tp_orders = []
+    remaining_qty = quantity
+    
+    # Place take profit orders for each level
+    for i, tp_level in enumerate(take_profit_levels):
+        # Last level uses all remaining quantity
+        if i == len(take_profit_levels) - 1:
+            level_qty = remaining_qty
+        else:
+            # Calculate quantity for this level
+            level_qty = round_quantity(quantity * tp_level['percentage'], symbol)
+            remaining_qty -= level_qty
+        
+        if level_qty <= 0:
+            logger.warning(f"Zero quantity for TP level {i+1}. Skipping.")
+            continue
+            
+        logger.info(f"Setting TP {i+1}: {level_qty} {symbol} ({tp_level['percentage']*100:.1f}% of position) at {tp_level['price']} ({tp_level['pct_from_entry']:.1f}% from entry)")
+        
+        # Place order - use reduce-only for partial closing
+        try:
+            close_side = "SELL" if side == "BUY" else "BUY"  # Opposite side to close
+            
+            # For partial TPs, we can't use closePosition=true, need to specify quantity
+            tp_order = binance_client.client.futures_create_order(
+                symbol=symbol,
+                side=close_side,
+                type='TAKE_PROFIT_MARKET',
+                stopPrice=tp_level['price'],
+                quantity=level_qty,
+                reduceOnly='true',
+                timeInForce='GTC'
+            )
+            
+            tp_orders.append(tp_order)
+            logger.info(f"Take profit {i+1} order placed successfully at {tp_level['price']}")
+        except Exception as e:
+            logger.error(f"Error placing take profit {i+1} order: {e}")
+    
+    return tp_orders
+
+def generate_trade_chart(symbol, side, price, profit_loss=None):
+    """
+    Generates a price chart showing the trade entry/exit and recent price action
+    
+    Args:
+        symbol: Trading symbol
+        side: Trade side (BUY/SELL)
+        price: Trade execution price
+        profit_loss: Optional profit/loss value
+    
+    Returns:
+        Path to saved chart image or None if failed
+    """
+    try:
+        # Create charts directory if needed
+        charts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'charts')
+        os.makedirs(charts_dir, exist_ok=True)
+        
+        # Get recent price data for chart
+        recent_klines = klines_data.get(symbol, [])
+        if not recent_klines or len(recent_klines) < 20:
+            logger.warning("Not enough historical data to generate trade chart")
+            return None
+            
+        # Convert to dataframe
+        df = pd.DataFrame(recent_klines[-100:], columns=[
+            'open_time', 'open', 'high', 'low', 'close', 'volume',
+            'close_time', 'quote_asset_volume', 'number_of_trades',
+            'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+        ])
+        
+        # Convert data types
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            df[col] = pd.to_numeric(df[col])
+            
+        df['timestamp'] = pd.to_datetime(df['open_time'].astype(float), unit='ms')
+        
+        # Create the chart
+        plt.figure(figsize=(10, 6))
+        
+        # Plot price action
+        plt.plot(df['timestamp'], df['close'], label='Price', color='blue', alpha=0.7)
+        
+        # Mark the trade
+        trade_color = 'green' if side == 'BUY' else 'red'
+        trade_marker = '^' if side == 'BUY' else 'v'
+        trade_label = f"{side} @ {price}"
+        
+        # Find closest timestamp to add marker
+        closest_time = df['timestamp'].iloc[-1]
+        
+        plt.scatter([closest_time], [price], color=trade_color, s=100, marker=trade_marker, label=trade_label)
+        
+        # Add horizontal line at trade price
+        plt.axhline(y=price, color=trade_color, linestyle='--', alpha=0.5)
+        
+        # Add profit/loss info if available
+        if profit_loss is not None:
+            profit_label = f"P/L: {'+' if profit_loss > 0 else ''}{profit_loss:.2f} USDT"
+            plt.annotate(profit_label, 
+                         xy=(df['timestamp'].iloc[-5], price), 
+                         xytext=(0, 10 if profit_loss > 0 else -20),
+                         textcoords='offset points',
+                         color='green' if profit_loss > 0 else 'red',
+                         fontweight='bold',
+                         arrowprops=dict(arrowstyle='->', color='green' if profit_loss > 0 else 'red'))
+        
+        # Set title and labels
+        plt.title(f"{symbol} Trade - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        plt.xlabel('Time')
+        plt.ylabel('Price')
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        
+        # Rotate x-axis labels for better readability
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        
+        # Save chart
+        chart_path = os.path.join(charts_dir, f"trade_{symbol}_{side}_{int(time.time())}.png")
+        plt.savefig(chart_path)
+        plt.close()
+        
+        logger.info(f"Trade chart saved to {chart_path}")
+        return chart_path
+        
+    except Exception as e:
+        logger.error(f"Error generating trade chart: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None
+
+
+def round_quantity(quantity, symbol):
+    """Round quantity based on symbol precision"""
+    try:
+        symbol_info = binance_client.get_symbol_info(symbol)
+        if symbol_info and 'quantity_precision' in symbol_info:
+            precision = symbol_info['quantity_precision']
+            return round(quantity, precision)
+        return quantity  # Return as is if we couldn't get precision
+    except Exception as e:
+        logger.warning(f"Error rounding quantity: {e}")
+        return quantity  # Return original quantity on error
 
 def main():
     """Main function to start the trading bot"""

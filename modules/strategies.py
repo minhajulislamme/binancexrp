@@ -474,6 +474,13 @@ class LayerDynamicGridStrategy(XRPDynamicGridStrategy):
     Dynamic LAYER Grid Trading Strategy that adapts to market trends
     and different market conditions (bullish, bearish, and sideways).
     This extends the XRPDynamicGrid strategy but is specialized for LAYER's specific characteristics.
+    
+    LAYER tokens typically exhibit:
+    - Higher volatility than XRP
+    - Stronger momentum trends
+    - More dramatic reversals
+    
+    This strategy adjusts parameters to account for these characteristics.
     """
     def __init__(self, 
                  grid_levels=5, 
@@ -487,7 +494,12 @@ class LayerDynamicGridStrategy(XRPDynamicGridStrategy):
                  volume_ma_period=20,
                  adx_period=14,
                  adx_threshold=25,
-                 sideways_threshold=15):
+                 sideways_threshold=15,
+                 # LAYER-specific parameters
+                 volatility_multiplier=1.1,
+                 trend_condition_multiplier=1.3,
+                 min_grid_spacing=0.6,
+                 max_grid_spacing=3.5):
         
         # Initialize with LAYER-specific parameters
         super().__init__(
@@ -507,35 +519,144 @@ class LayerDynamicGridStrategy(XRPDynamicGridStrategy):
         
         # Change strategy name to reflect LAYER
         self.strategy_name = 'LayerDynamicGrid'
+        
+        # Store LAYER-specific configuration
+        self.volatility_multiplier = volatility_multiplier
+        self.trend_condition_multiplier = trend_condition_multiplier
+        self.min_grid_spacing = min_grid_spacing
+        self.max_grid_spacing = max_grid_spacing
+        
+        # Cached indicators to avoid recalculation
+        self._last_kline_time = None
+        self._cached_dataframe = None
+    
+    def prepare_data(self, klines):
+        """
+        Convert raw klines to a DataFrame with OHLCV data
+        Overrides base method to implement caching for performance
+        """
+        # Check if we can use cached data
+        if len(klines) > 0 and self._last_kline_time == klines[-1][0]:
+            return self._cached_dataframe
+            
+        # Otherwise prepare data normally
+        df = super().prepare_data(klines)
+        
+        # Cache the result
+        if len(klines) > 0:
+            self._last_kline_time = klines[-1][0]
+            self._cached_dataframe = df
+            
+        return df
     
     # Override calculate_grid_spacing method for LAYER-specific behavior
     def calculate_grid_spacing(self, df):
-        """Dynamically calculate grid spacing based on volatility and market condition - optimized for LAYER"""
-        # Get the latest row
-        latest = df.iloc[-1]
+        """
+        Dynamically calculate grid spacing based on volatility and market condition - optimized for LAYER
         
-        # Base grid spacing on ATR percentage with LAYER-specific adjustment
-        base_spacing = latest['atr_pct'] * 1.1  # 10% more than XRP due to LAYER's characteristics
-        
-        # Adjust based on Bollinger Band width
-        bb_multiplier = min(max(latest['bb_width'] * 5, 0.5), 3.0)
-        
-        # Adjust based on market condition
-        market_condition = latest['market_condition']
-        if market_condition == 'SIDEWAYS':
-            # Tighter grid spacing in sideways markets
-            condition_multiplier = 0.8
-        elif market_condition == 'BULLISH' or market_condition == 'BEARISH':
-            # Wider grid spacing in trending markets for LAYER
-            condition_multiplier = 1.3  # Slightly more than XRP (was 1.2)
-        else:
-            condition_multiplier = 1.0
-        
-        # Calculate final grid spacing
-        dynamic_spacing = base_spacing * bb_multiplier * condition_multiplier
-        
-        # Ensure minimum and maximum spacing, LAYER can have wider grids
-        return min(max(dynamic_spacing, 0.6), 3.5)  # Min 0.6% (vs 0.5%), Max 3.5% (vs 3.0%)
+        Args:
+            df: DataFrame with indicators
+            
+        Returns:
+            float: Grid spacing percentage
+        """
+        try:
+            # Get the latest row
+            latest = df.iloc[-1]
+            
+            # Base grid spacing on ATR percentage with LAYER-specific adjustment
+            base_spacing = latest['atr_pct'] * self.volatility_multiplier
+            
+            # Adjust based on Bollinger Band width
+            bb_multiplier = min(max(latest['bb_width'] * 5, 0.5), 3.0)
+            
+            # Adjust based on market condition
+            market_condition = latest['market_condition']
+            if market_condition == 'SIDEWAYS':
+                # Tighter grid spacing in sideways markets
+                condition_multiplier = 0.8
+            elif market_condition == 'BULLISH' or market_condition == 'BEARISH':
+                # Wider grid spacing in trending markets for LAYER
+                condition_multiplier = self.trend_condition_multiplier
+            else:
+                condition_multiplier = 1.0
+            
+            # Calculate final grid spacing
+            dynamic_spacing = base_spacing * bb_multiplier * condition_multiplier
+            
+            # Ensure minimum and maximum spacing, LAYER can have wider grids
+            return min(max(dynamic_spacing, self.min_grid_spacing), self.max_grid_spacing)
+            
+        except Exception as e:
+            logger.error(f"Error calculating grid spacing: {e}")
+            # Return default spacing in case of error
+            return self.grid_spacing_pct
+    
+    def get_bullish_signal(self, df):
+        """
+        Get signal optimized for bullish market conditions
+        Modified for LAYER's higher volatility characteristics
+        """
+        if len(df) < 3:
+            return None
+            
+        try:
+            latest = df.iloc[-1]
+            prev = df.iloc[-2]
+            
+            # LAYER requires more aggressive oversold conditions for buy signals
+            # RSI threshold lowered from 40 to 35 for buy signals
+            if latest['rsi'] < 35:
+                return 'BUY'
+                
+            # Buy on MACD crossover to the upside with volume confirmation
+            if (prev['macd'] < prev['macd_signal'] and 
+                latest['macd'] > latest['macd_signal'] and 
+                latest['volume_ratio'] > 1.2):  # Added volume confirmation
+                return 'BUY'
+                
+            # Sell on extreme overbought conditions specific to LAYER
+            if latest['rsi'] > 80 and latest['close'] > latest['bb_upper'] * 1.01:  # Slightly higher threshold
+                return 'SELL'
+                
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error in get_bullish_signal: {e}")
+            return None
+    
+    def get_bearish_signal(self, df):
+        """
+        Get signal optimized for bearish market conditions
+        Modified for LAYER's higher volatility characteristics
+        """
+        if len(df) < 3:
+            return None
+            
+        try:
+            latest = df.iloc[-1]
+            prev = df.iloc[-2]
+            
+            # LAYER requires more aggressive overbought conditions for sell signals
+            # RSI threshold raised from 60 to 65 for sell signals
+            if latest['rsi'] > 65:
+                return 'SELL'
+                
+            # Sell on MACD crossover to the downside with volume confirmation
+            if (prev['macd'] > prev['macd_signal'] and 
+                latest['macd'] < latest['macd_signal'] and 
+                latest['volume_ratio'] > 1.2):  # Added volume confirmation
+                return 'SELL'
+                
+            # Buy on extreme oversold conditions specific to LAYER
+            if latest['rsi'] < 20 and latest['close'] < latest['bb_lower'] * 0.99:  # Slightly lower threshold
+                return 'BUY'
+                
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error in get_bearish_signal: {e}")
+            return None
 
 
 # Update the factory function to include the new LAYER strategy with proper parameter loading
@@ -547,7 +668,10 @@ def get_strategy(strategy_name):
         XRP_VOLUME_MA_PERIOD, XRP_ADX_PERIOD, XRP_ADX_THRESHOLD, XRP_SIDEWAYS_THRESHOLD,
         LAYER_GRID_LEVELS, LAYER_GRID_SPACING_PCT, LAYER_TREND_EMA_FAST, LAYER_TREND_EMA_SLOW,
         LAYER_VOLATILITY_LOOKBACK, LAYER_VOLUME_MA_PERIOD, LAYER_ADX_PERIOD, 
-        LAYER_ADX_THRESHOLD, LAYER_SIDEWAYS_THRESHOLD
+        LAYER_ADX_THRESHOLD, LAYER_SIDEWAYS_THRESHOLD,
+        # New LAYER specific parameters
+        LAYER_VOLATILITY_MULTIPLIER, LAYER_TREND_CONDITION_MULTIPLIER,
+        LAYER_MIN_GRID_SPACING, LAYER_MAX_GRID_SPACING
     )
     
     strategies = {
@@ -577,7 +701,12 @@ def get_strategy(strategy_name):
             volume_ma_period=LAYER_VOLUME_MA_PERIOD,
             adx_period=LAYER_ADX_PERIOD,
             adx_threshold=LAYER_ADX_THRESHOLD,
-            sideways_threshold=LAYER_SIDEWAYS_THRESHOLD
+            sideways_threshold=LAYER_SIDEWAYS_THRESHOLD,
+            # Pass new LAYER specific parameters
+            volatility_multiplier=LAYER_VOLATILITY_MULTIPLIER,
+            trend_condition_multiplier=LAYER_TREND_CONDITION_MULTIPLIER,
+            min_grid_spacing=LAYER_MIN_GRID_SPACING,
+            max_grid_spacing=LAYER_MAX_GRID_SPACING
         )
     }
     

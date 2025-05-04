@@ -1,5 +1,7 @@
 import logging
 import math
+import pandas as pd
+import ta
 from modules.config import (
     INITIAL_BALANCE, RISK_PER_TRADE, MAX_OPEN_POSITIONS,
     USE_STOP_LOSS, STOP_LOSS_PCT, USE_TAKE_PROFIT, 
@@ -390,6 +392,148 @@ class RiskManager:
             return True
             
         return False
+
+    def calculate_partial_take_profits(self, symbol, side, entry_price):
+        """
+        Calculate multiple partial take profit levels based on market condition
+        
+        Args:
+            symbol: Trading pair symbol
+            side: 'BUY' or 'SELL'
+            entry_price: Entry price of the position
+            
+        Returns:
+            list: List of dictionaries with take profit levels and percentages of position to close
+        """
+        if not USE_TAKE_PROFIT:
+            return []
+            
+        # Choose take profit percentage based on market condition
+        if self.current_market_condition == 'BULLISH':
+            tp1_pct = TAKE_PROFIT_PCT_BULLISH * 0.5  # 50% of target
+            tp2_pct = TAKE_PROFIT_PCT_BULLISH        # 100% of target
+            tp3_pct = TAKE_PROFIT_PCT_BULLISH * 1.5  # 150% of target
+        elif self.current_market_condition == 'BEARISH':
+            tp1_pct = TAKE_PROFIT_PCT_BEARISH * 0.5  # Earlier take profit in bearish market
+            tp2_pct = TAKE_PROFIT_PCT_BEARISH
+            tp3_pct = TAKE_PROFIT_PCT_BEARISH * 1.3  # Only 130% of target in bearish markets
+        elif self.current_market_condition == 'SIDEWAYS':
+            tp1_pct = TAKE_PROFIT_PCT_SIDEWAYS * 0.7  # Take profits quicker in sideways markets
+            tp2_pct = TAKE_PROFIT_PCT_SIDEWAYS
+            tp3_pct = TAKE_PROFIT_PCT_SIDEWAYS * 1.2  # Conservative extension in sideways
+        else:
+            tp1_pct = TAKE_PROFIT_PCT * 0.5
+            tp2_pct = TAKE_PROFIT_PCT
+            tp3_pct = TAKE_PROFIT_PCT * 1.5
+        
+        # Get symbol info for price precision
+        symbol_info = self.binance_client.get_symbol_info(symbol)
+        price_precision = 2  # Default
+        if symbol_info:
+            price_precision = symbol_info.get('price_precision', 2)
+        
+        # Calculate take profit prices
+        if side == "BUY":  # Long position
+            tp1_price = round(entry_price * (1 + tp1_pct), price_precision)
+            tp2_price = round(entry_price * (1 + tp2_pct), price_precision)
+            tp3_price = round(entry_price * (1 + tp3_pct), price_precision)
+        else:  # Short position
+            tp1_price = round(entry_price * (1 - tp1_pct), price_precision)
+            tp2_price = round(entry_price * (1 - tp2_pct), price_precision)
+            tp3_price = round(entry_price * (1 - tp3_pct), price_precision)
+        
+        # Define partial take profit levels with % of position to close at each level
+        take_profits = [
+            {'price': tp1_price, 'percentage': 0.3, 'pct_from_entry': tp1_pct * 100},  # Close 30% at first TP
+            {'price': tp2_price, 'percentage': 0.4, 'pct_from_entry': tp2_pct * 100},  # Close 40% at second TP
+            {'price': tp3_price, 'percentage': 0.3, 'pct_from_entry': tp3_pct * 100}   # Close 30% at third TP
+        ]
+        
+        logger.info(f"Calculated {self.current_market_condition} partial take profits: "
+                   f"TP1: {tp1_price} ({tp1_pct*100:.2f}%), "
+                   f"TP2: {tp2_price} ({tp2_pct*100:.2f}%), "
+                   f"TP3: {tp3_price} ({tp3_pct*100:.2f}%)")
+                   
+        return take_profits
+        
+    def calculate_volatility_based_stop_loss(self, symbol, side, entry_price, klines=None):
+        """
+        Calculate stop loss based on volatility (ATR) rather than fixed percentage
+        
+        Args:
+            symbol: Trading pair symbol
+            side: 'BUY' or 'SELL'
+            entry_price: Entry price
+            klines: Optional recent price data for ATR calculation
+            
+        Returns:
+            float: Volatility-adjusted stop loss price
+        """
+        if not USE_STOP_LOSS:
+            return None
+            
+        # If no klines provided, use default percentage-based stop loss
+        if klines is None:
+            return self.calculate_stop_loss(symbol, side, entry_price)
+            
+        try:
+            # Convert klines to dataframe for ATR calculation
+            df = pd.DataFrame(klines, columns=[
+                'open_time', 'open', 'high', 'low', 'close', 'volume',
+                'close_time', 'quote_asset_volume', 'number_of_trades',
+                'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+            ])
+            
+            # Convert string values to numeric
+            for col in ['open', 'high', 'low', 'close']:
+                df[col] = pd.to_numeric(df[col])
+                
+            # Calculate ATR
+            atr_period = 14
+            if len(df) >= atr_period:
+                # Use ta library ATR
+                atr = ta.volatility.average_true_range(
+                    df['high'], df['low'], df['close'], window=atr_period
+                ).iloc[-1]
+                
+                # Calculate ATR as percentage of price
+                atr_pct = atr / entry_price
+                
+                # Base multiplier on market condition
+                if self.current_market_condition == 'BULLISH':
+                    atr_multiplier = 2.0  # Wider stops in bullish trend
+                elif self.current_market_condition == 'BEARISH':
+                    atr_multiplier = 1.5  # Medium stops in bearish trend
+                else:  # SIDEWAYS
+                    atr_multiplier = 1.0  # Tighter stops in sideways market
+                
+                # Calculate stop loss price - use ATR * multiplier but cap it
+                if side == "BUY":  # Long
+                    # Cap maximum stop distance to standard percentage stop loss
+                    max_stop_distance = entry_price * STOP_LOSS_PCT
+                    atr_stop_distance = min(atr * atr_multiplier, max_stop_distance)
+                    stop_price = entry_price - atr_stop_distance
+                else:  # Short
+                    max_stop_distance = entry_price * STOP_LOSS_PCT
+                    atr_stop_distance = min(atr * atr_multiplier, max_stop_distance)
+                    stop_price = entry_price + atr_stop_distance
+                
+                # Apply price precision
+                symbol_info = self.binance_client.get_symbol_info(symbol)
+                if symbol_info:
+                    price_precision = symbol_info['price_precision']
+                    stop_price = round(stop_price, price_precision)
+                    
+                logger.info(f"Calculated ATR-based stop loss at {stop_price} "
+                          f"(ATR: {atr:.6f}, {atr_pct*100:.2f}% of price, "
+                          f"Multiplier: {atr_multiplier})")
+                return stop_price
+                
+        except Exception as e:
+            logger.error(f"Error calculating volatility-based stop loss: {e}")
+            
+        # Fall back to standard stop loss if ATR calculation fails
+        return self.calculate_stop_loss(symbol, side, entry_price)
 
 
 def round_step_size(quantity, step_size):
