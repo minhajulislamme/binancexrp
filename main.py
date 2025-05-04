@@ -1088,6 +1088,17 @@ def handle_exit(signal, frame):
     logger.info("Shutdown signal received. Cleaning up...")
     running = False
     
+    # Send notification that bot is stopping
+    try:
+        notifier = TelegramNotifier()
+        notifier.send_message("🛑 *Trading Bot Stopping*\n\n"
+                            f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                            f"Trading Symbol: {TRADING_SYMBOL}\n"
+                            f"Current Balance: {stats['current_balance']:.2f} USDT\n\n"
+                            "Bot has received shutdown signal and is stopping gracefully.")
+    except Exception as e:
+        logger.error(f"Failed to send stop notification: {e}")
+    
     if websocket_manager:
         websocket_manager.stop()
         logger.info("WebSocket connections closed")
@@ -1639,7 +1650,7 @@ def main():
     global running, stats, websocket_manager
     
     parser = argparse.ArgumentParser(description='Binance Futures Trading Bot')
-    parser.add_argument('--backtest', action='store_true', help='Run in backtest mode')
+    parser.add_argument('--backtest', action='store_true', help='Run in backtest mode only')
     parser.add_argument('--start-date', type=str, help='Start date for backtest (YYYY-MM-DD)')
     parser.add_argument('--end-date', type=str, help='End date for backtest (YYYY-MM-DD)')
     parser.add_argument('--symbol', type=str, default=TRADING_SYMBOL, help='Trading symbol for backtest')
@@ -1649,10 +1660,9 @@ def main():
     parser.add_argument('--interval', type=int, default=5, help='Trading check interval in minutes')
     parser.add_argument('--skip-validation', action='store_true', help='Skip strategy validation before live trading')
     parser.add_argument('--skip-test-trade', action='store_true', help='Skip test trade before live trading')
-    # Keep the --small-account flag for backward compatibility but make it optional
     parser.add_argument('--small-account', action='store_true', help='Run with small account (under $45) - skips test trade and uses adjusted risk')
     parser.add_argument('--force-balance', action='store_true', help='Force initialization of balance from config file')
-    parser.add_argument('--test-trade', action='store_true', help='Run test trade and exit')
+    parser.add_argument('--test-trade', action='store_true', help='Run test trade only and exit')
     args = parser.parse_args()
     
     signal.signal(signal.SIGINT, handle_exit)
@@ -1660,127 +1670,162 @@ def main():
     
     # For the report command, make sure we can access the config
     if args.report:
-        # Try to import INITIAL_BALANCE directly here
-        try:
-            from modules.config import INITIAL_BALANCE
-            # Ensure it's available if needed
-            if INITIAL_BALANCE > 0:
-                logger.info(f"Using configured initial balance: {INITIAL_BALANCE} USDT")
-        except ImportError:
-            logger.warning("Could not import INITIAL_BALANCE from config")
-    
-    if args.backtest:
-        start_date = args.start_date or "1 year ago"
-        run_backtest(args.symbol, args.timeframe, args.strategy, start_date, args.end_date)
-        return
-    
-    if args.report:
         setup()
-        # Make sure we have a state file with correct balance before generating report
-        if args.force_balance:
-            initialize_state_file(force=True)
-        else:
-            initialize_state_file()
         generate_performance_report()
         return
     
-    if args.test_trade:
-        setup()
-        perform_test_trade(args.symbol or TRADING_SYMBOL)
+    # Run only in backtest mode
+    if args.backtest:
+        symbol = args.symbol or TRADING_SYMBOL
+        timeframe = args.timeframe or TIMEFRAME
+        strategy = args.strategy or STRATEGY
+        start_date = args.start_date or "30 days ago"
+        
+        run_backtest(
+            symbol=symbol,
+            timeframe=timeframe,
+            strategy_name=strategy,
+            start_date=start_date,
+            end_date=args.end_date
+        )
         return
     
-    # Initialize basic setup to check account balance
-    try:
-        global binance_client
-        binance_client = BinanceClient()
-        logger.info("Binance client initialized for initial balance check")
-    except Exception as e:
-        logger.error(f"Failed to initialize Binance client for balance check: {e}")
-        exit(1)
+    # Run only a test trade
+    if args.test_trade:
+        setup()
+        symbol = args.symbol or TRADING_SYMBOL
+        perform_test_trade(symbol)
+        return
+    
+    # Initialize basic setup
+    setup()
     
     # Auto-detect small account
     try:
-        initial_balance = binance_client.get_account_balance()
-        is_small_account = initial_balance < 100.0
-        
-        # Apply small account settings if detected OR explicitly flagged
-        if is_small_account or args.small_account:
-            if is_small_account:
-                logger.info(f"Small account automatically detected (${initial_balance:.2f})")
-            # Skip test trade for small accounts to save on fees
-            args.skip_test_trade = True
-            logger.info("Small account mode enabled: Test trade will be skipped")
+        account_balance = binance_client.get_account_balance()
+        if account_balance < 50:
+            logger.info(f"Small account detected (${account_balance:.2f}), automatically enabling small account mode")
+            args.small_account = True
     except Exception as e:
-        logger.error(f"Failed to check account balance: {e}")
-        logger.warning("Continuing without small account detection")
-        # If we can't check balance, we don't modify any settings
+        logger.error(f"Error detecting account size: {e}")
     
-    # Run safety backtest before starting live trading
-    if BACKTEST_BEFORE_LIVE and not args.skip_validation:
-        logger.info("Running strategy validation before starting live trading")
-        is_valid, message = run_safety_backtest(
-            symbol=args.symbol or TRADING_SYMBOL,
-            timeframe=args.timeframe,
-            strategy_name=args.strategy or STRATEGY
-        )
+    # Load previous state if available
+    previous_state = load_state()
+    if previous_state:
+        stats.update(previous_state)
+    
+    # Force initialize state file with proper balance if requested
+    if args.force_balance:
+        logger.info("Forcing state file initialization with current balance")
+        initialize_state_file(force=True)
+        
+    # Get symbol info for this trading pair
+    symbol = args.symbol or TRADING_SYMBOL
+    timeframe = args.timeframe or TIMEFRAME
+    strategy_name = args.strategy or STRATEGY
+    
+    # Sequential execution flow: Backtest -> Test Trade -> Live Trading
+    
+    # Step 1: Run a backtest first to validate the strategy
+    if not args.skip_validation and BACKTEST_BEFORE_LIVE:
+        logger.info("===== STEP 1: RUNNING STRATEGY VALIDATION BACKTEST =====")
+        is_valid, validation_message = run_safety_backtest(symbol, timeframe, strategy_name)
         
         if not is_valid:
-            logger.error(f"Strategy validation failed: {message}")
-            logger.error("Use --skip-validation to bypass this check")
-            return
-    
-    # Complete setup if not already done
-    if not hasattr(main, 'setup_complete') or not main.setup_complete:
-        setup()
-        main.setup_complete = True
-    
-    # Force initialize state file if requested
-    if args.force_balance:
-        initialize_state_file(force=True)
-    
-    # Check balance again for very small accounts (after full setup)
-    initial_balance = binance_client.get_account_balance()
-    if initial_balance < 5.0:
-        logger.error(f"Account balance is extremely low: {initial_balance:.6f} USDT")
-        logger.error("Account balance is too low to trade effectively. Please deposit funds.")
-        return
-    
-    # Perform a test trade before starting live trading
-    if not args.skip_test_trade:
-        logger.info("Running test trade before starting live trading")
-        if not perform_test_trade(args.symbol or TRADING_SYMBOL):
-            logger.error("Test trade failed. Aborting live trading.")
-            logger.error("Use --skip-test-trade to bypass this check")
-            return
-    
-    loaded_stats = load_state()
-    if loaded_stats:
-        stats.update(loaded_stats)
+            logger.warning(f"Strategy validation failed: {validation_message}")
+            logger.warning("You can override this with --skip-validation flag")
+            
+            # Notify user and wait for confirmation to continue
+            notifier = TelegramNotifier()
+            notifier.send_message(f"⚠️ *Strategy Validation Failed*\n\n"
+                                  f"Symbol: {symbol}\n"
+                                  f"Strategy: {strategy_name}\n"
+                                  f"Reason: {validation_message}\n\n"
+                                  f"Bot will continue anyway as validation is not strict. Add --skip-validation to bypass this check.")
+            
+            logger.warning("Continuing despite strategy validation failure after 5 seconds...")
+            time.sleep(5)  # Brief pause to allow user to see the message
     else:
-        initialize_state_file()
+        logger.info("Strategy validation backtest skipped")
     
-    logger.info(f"Starting trading bot with WebSocket for real-time data")
-    logger.info(f"Trading pair: {TRADING_SYMBOL}")
-    logger.info(f"Strategy: {strategy.strategy_name}")
-    logger.info(f"Daily reports: {'Enabled' if SEND_DAILY_REPORT else 'Disabled'}")
-    logger.info(f"Status reports: Every 2 hours")
-    logger.info(f"Press Ctrl+C to stop the bot")
-    
-    schedule.every().hour.do(save_state)
-    schedule.every(2).hours.do(send_status_report)  # Changed from 6 hours to 2 hours
-    
-    if SEND_DAILY_REPORT:
-        schedule.every().day.at(DAILY_REPORT_TIME).do(send_daily_report)
-    else:
-        schedule.every(24).hours.do(generate_performance_report)
-    
-    while running:
-        schedule.run_pending()
-        time.sleep(1)
+    # Step 2: Perform a test trade to verify API connectivity and permissions
+    if not (args.skip_test_trade or args.small_account):
+        logger.info("===== STEP 2: PERFORMING TEST TRADE =====")
+        test_trade_success = perform_test_trade(symbol)
         
-    logger.info("Bot stopped. Generating final report...")
-    generate_performance_report()
+        if not test_trade_success:
+            logger.error("Test trade failed! Please check API settings and permissions.")
+            logger.error("You can bypass this check with --skip-test-trade flag")
+            
+            # Notify user and wait for confirmation to continue
+            notifier = TelegramNotifier()
+            notifier.send_message(f"⚠️ *Test Trade Failed*\n\n"
+                                  f"Symbol: {symbol}\n"
+                                  f"Check API keys, permissions, and account balance.\n\n"
+                                  f"Bot will continue anyway with live trading. Use --skip-test-trade to bypass this check in the future.")
+            
+            logger.warning("Continuing despite test trade failure after 10 seconds...")
+            time.sleep(10)  # Longer pause for test trade issues as they're more serious
+    else:
+        logger.info("Test trade skipped")
+    
+    # Step 3: Start the actual trading bot
+    logger.info("===== STEP 3: STARTING LIVE TRADING BOT =====")
+    notifier = TelegramNotifier()
+    notifier.send_message(f"🚀 *Trading Bot Starting*\n\n"
+                          f"Symbol: {symbol}\n"
+                          f"Strategy: {strategy_name}\n"
+                          f"Timeframe: {timeframe}\n"
+                          f"Starting Balance: {stats['current_balance']:.2f} USDT")
+    
+    # Main trading loop
+    check_interval = args.interval * 60  # Convert to seconds
+    next_check = time.time()
+    next_report = datetime.now().replace(hour=0, minute=0, second=0) + timedelta(days=1)
+    last_status_report = time.time() - 7200  # Send status report after first 2 hours
+    
+    # Begin regular trading cycle
+    while running:
+        try:
+            current_time = time.time()
+            
+            # Check for trading signals
+            if current_time >= next_check:
+                logger.debug("Running regular trading check")
+                check_for_signals()
+                next_check = current_time + check_interval
+            
+            # Check if it's time for the daily report
+            now = datetime.now()
+            if now >= next_report:
+                logger.info("Time for the daily report")
+                send_daily_report()
+                next_report = now.replace(hour=0, minute=0, second=0) + timedelta(days=1)
+            
+            # Send status report every 2 hours
+            if current_time - last_status_report >= 2 * 3600:
+                send_status_report()
+                last_status_report = current_time
+            
+            # Save current state
+            if int(current_time) % 600 == 0:  # Every 10 minutes
+                save_state()
+            
+            # Sleep to avoid high CPU usage
+            time.sleep(1)
+        except Exception as e:
+            logger.error(f"Error in main loop: {e}")
+            logger.error(traceback.format_exc())
+            time.sleep(60)  # Wait a minute before retrying on error
+    
+    # Clean up before exit
+    if websocket_manager:
+        websocket_manager.stop()
+    
+    # Final save of state
     save_state()
-
+    
+    logger.info("Trading bot stopped")
+    
 if __name__ == "__main__":
     main()
