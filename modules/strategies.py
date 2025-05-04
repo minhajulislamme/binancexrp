@@ -469,12 +469,85 @@ class XRPDynamicGridStrategy(TradingStrategy):
         return grid_signal
 
 
+class LayerDynamicGridStrategy(XRPDynamicGridStrategy):
+    """
+    Dynamic LAYER Grid Trading Strategy that adapts to market trends
+    and different market conditions (bullish, bearish, and sideways).
+    This extends the XRPDynamicGrid strategy but is specialized for LAYER's specific characteristics.
+    """
+    def __init__(self, 
+                 grid_levels=5, 
+                 grid_spacing_pct=1.2,  # Updated default for LAYER
+                 trend_ema_fast=8,
+                 trend_ema_slow=21,
+                 volatility_lookback=20,
+                 rsi_period=14,
+                 rsi_overbought=70,
+                 rsi_oversold=30,
+                 volume_ma_period=20,
+                 adx_period=14,
+                 adx_threshold=25,
+                 sideways_threshold=15):
+        
+        # Initialize with LAYER-specific parameters
+        super().__init__(
+            grid_levels=grid_levels,
+            grid_spacing_pct=grid_spacing_pct,
+            trend_ema_fast=trend_ema_fast,
+            trend_ema_slow=trend_ema_slow,
+            volatility_lookback=volatility_lookback,
+            rsi_period=rsi_period,
+            rsi_overbought=rsi_overbought,
+            rsi_oversold=rsi_oversold,
+            volume_ma_period=volume_ma_period,
+            adx_period=adx_period,
+            adx_threshold=adx_threshold,
+            sideways_threshold=sideways_threshold
+        )
+        
+        # Change strategy name to reflect LAYER
+        self.strategy_name = 'LayerDynamicGrid'
+    
+    # Override calculate_grid_spacing method for LAYER-specific behavior
+    def calculate_grid_spacing(self, df):
+        """Dynamically calculate grid spacing based on volatility and market condition - optimized for LAYER"""
+        # Get the latest row
+        latest = df.iloc[-1]
+        
+        # Base grid spacing on ATR percentage with LAYER-specific adjustment
+        base_spacing = latest['atr_pct'] * 1.1  # 10% more than XRP due to LAYER's characteristics
+        
+        # Adjust based on Bollinger Band width
+        bb_multiplier = min(max(latest['bb_width'] * 5, 0.5), 3.0)
+        
+        # Adjust based on market condition
+        market_condition = latest['market_condition']
+        if market_condition == 'SIDEWAYS':
+            # Tighter grid spacing in sideways markets
+            condition_multiplier = 0.8
+        elif market_condition == 'BULLISH' or market_condition == 'BEARISH':
+            # Wider grid spacing in trending markets for LAYER
+            condition_multiplier = 1.3  # Slightly more than XRP (was 1.2)
+        else:
+            condition_multiplier = 1.0
+        
+        # Calculate final grid spacing
+        dynamic_spacing = base_spacing * bb_multiplier * condition_multiplier
+        
+        # Ensure minimum and maximum spacing, LAYER can have wider grids
+        return min(max(dynamic_spacing, 0.6), 3.5)  # Min 0.6% (vs 0.5%), Max 3.5% (vs 3.0%)
+
+
+# Update the factory function to include the new LAYER strategy with proper parameter loading
 def get_strategy(strategy_name):
     """Factory function to get a strategy by name"""
     from modules.config import (
         XRP_GRID_LEVELS, XRP_GRID_SPACING_PCT, XRP_TREND_EMA_FAST, XRP_TREND_EMA_SLOW,
         XRP_VOLATILITY_LOOKBACK, RSI_PERIOD, RSI_OVERBOUGHT, RSI_OVERSOLD,
-        XRP_VOLUME_MA_PERIOD, XRP_ADX_PERIOD, XRP_ADX_THRESHOLD, XRP_SIDEWAYS_THRESHOLD
+        XRP_VOLUME_MA_PERIOD, XRP_ADX_PERIOD, XRP_ADX_THRESHOLD, XRP_SIDEWAYS_THRESHOLD,
+        LAYER_GRID_LEVELS, LAYER_GRID_SPACING_PCT, LAYER_TREND_EMA_FAST, LAYER_TREND_EMA_SLOW,
+        LAYER_VOLATILITY_LOOKBACK, LAYER_VOLUME_MA_PERIOD, LAYER_ADX_PERIOD, 
+        LAYER_ADX_THRESHOLD, LAYER_SIDEWAYS_THRESHOLD
     )
     
     strategies = {
@@ -491,6 +564,20 @@ def get_strategy(strategy_name):
             adx_period=XRP_ADX_PERIOD,
             adx_threshold=XRP_ADX_THRESHOLD,
             sideways_threshold=XRP_SIDEWAYS_THRESHOLD
+        ),
+        'LayerDynamicGrid': LayerDynamicGridStrategy(
+            grid_levels=LAYER_GRID_LEVELS,
+            grid_spacing_pct=LAYER_GRID_SPACING_PCT,
+            trend_ema_fast=LAYER_TREND_EMA_FAST,
+            trend_ema_slow=LAYER_TREND_EMA_SLOW,
+            volatility_lookback=LAYER_VOLATILITY_LOOKBACK,
+            rsi_period=RSI_PERIOD,
+            rsi_overbought=RSI_OVERBOUGHT,
+            rsi_oversold=RSI_OVERSOLD,
+            volume_ma_period=LAYER_VOLUME_MA_PERIOD,
+            adx_period=LAYER_ADX_PERIOD,
+            adx_threshold=LAYER_ADX_THRESHOLD,
+            sideways_threshold=LAYER_SIDEWAYS_THRESHOLD
         )
     }
     
@@ -509,7 +596,8 @@ def get_strategy_for_symbol(symbol, strategy_name=None):
     
     # Default strategies based on symbol
     symbol_strategies = {
-        'XRPUSDT': XRPDynamicGridStrategy()
+        'XRPUSDT': XRPDynamicGridStrategy(),
+        'LAYERUSDT': LayerDynamicGridStrategy()
     }
     
     if symbol in symbol_strategies:

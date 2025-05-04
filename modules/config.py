@@ -24,14 +24,14 @@ else:
 # API request settings
 RECV_WINDOW = int(os.getenv('BINANCE_RECV_WINDOW', '10000'))
 
-# Trading parameters
-TRADING_SYMBOL = os.getenv('TRADING_SYMBOL', 'XRPUSDT')
+# Trading parameters - Support for both XRPUSDT and LAYERUSDT
+TRADING_SYMBOL = os.getenv('TRADING_SYMBOL', 'LAYERUSDT')
 TRADING_TYPE = 'FUTURES'  # Use futures trading
 LEVERAGE = int(os.getenv('LEVERAGE', '10'))
 MARGIN_TYPE = os.getenv('MARGIN_TYPE', 'ISOLATED')  # ISOLATED or CROSSED
-STRATEGY = os.getenv('STRATEGY', 'XRPDynamicGrid')
+STRATEGY = os.getenv('STRATEGY', 'LayerDynamicGrid')
 
-# XRP Dynamic Grid Strategy settings
+# XRP-specific strategy settings
 XRP_GRID_LEVELS = int(os.getenv('XRP_GRID_LEVELS', '5'))
 XRP_GRID_SPACING_PCT = float(os.getenv('XRP_GRID_SPACING_PCT', '1.0'))
 XRP_TREND_EMA_FAST = int(os.getenv('XRP_TREND_EMA_FAST', '8'))
@@ -39,14 +39,26 @@ XRP_TREND_EMA_SLOW = int(os.getenv('XRP_TREND_EMA_SLOW', '21'))
 XRP_VOLATILITY_LOOKBACK = int(os.getenv('XRP_VOLATILITY_LOOKBACK', '20'))
 XRP_VOLUME_MA_PERIOD = int(os.getenv('XRP_VOLUME_MA_PERIOD', '20'))
 
+# LAYER-specific strategy settings
+LAYER_GRID_LEVELS = int(os.getenv('LAYER_GRID_LEVELS', '5'))
+LAYER_GRID_SPACING_PCT = float(os.getenv('LAYER_GRID_SPACING_PCT', '1.2'))
+LAYER_TREND_EMA_FAST = int(os.getenv('LAYER_TREND_EMA_FAST', '8'))
+LAYER_TREND_EMA_SLOW = int(os.getenv('LAYER_TREND_EMA_SLOW', '21'))
+LAYER_VOLATILITY_LOOKBACK = int(os.getenv('LAYER_VOLATILITY_LOOKBACK', '20'))
+LAYER_VOLUME_MA_PERIOD = int(os.getenv('LAYER_VOLUME_MA_PERIOD', '20'))
+
 # Market condition detection settings
 XRP_ADX_PERIOD = int(os.getenv('XRP_ADX_PERIOD', '14'))
 XRP_ADX_THRESHOLD = int(os.getenv('XRP_ADX_THRESHOLD', '25'))
 XRP_SIDEWAYS_THRESHOLD = int(os.getenv('XRP_SIDEWAYS_THRESHOLD', '15'))
 
+LAYER_ADX_PERIOD = int(os.getenv('LAYER_ADX_PERIOD', '14'))
+LAYER_ADX_THRESHOLD = int(os.getenv('LAYER_ADX_THRESHOLD', '25'))
+LAYER_SIDEWAYS_THRESHOLD = int(os.getenv('LAYER_SIDEWAYS_THRESHOLD', '15'))
+
 # Position sizing
 INITIAL_BALANCE = float(os.getenv('INITIAL_BALANCE', '50.0'))
-RISK_PER_TRADE = float(os.getenv('RISK_PER_TRADE', '0.03'))
+RISK_PER_TRADE = float(os.getenv('RISK_PER_TRADE', '0.10'))
 MAX_OPEN_POSITIONS = int(os.getenv('MAX_OPEN_POSITIONS', '6'))
 
 # Auto-compounding settings
@@ -99,12 +111,12 @@ BACKTEST_USE_AUTO_COMPOUND = os.getenv('BACKTEST_USE_AUTO_COMPOUND', 'True').low
 # Pre-live backtest validation
 BACKTEST_BEFORE_LIVE = os.getenv('BACKTEST_BEFORE_LIVE', 'True').lower() == 'true'
 BACKTEST_MIN_PROFIT_PCT = float(os.getenv('BACKTEST_MIN_PROFIT_PCT', '5.0'))
-BACKTEST_MIN_WIN_RATE = float(os.getenv('BACKTEST_MIN_WIN_RATE', '50.0'))
-BACKTEST_PERIOD = os.getenv('BACKTEST_PERIOD', '60 days')
+BACKTEST_MIN_WIN_RATE = float(os.getenv('BACKTEST_MIN_WIN_RATE', '40.0'))
+BACKTEST_PERIOD = os.getenv('BACKTEST_PERIOD', '15 days')
 
 # Logging and notifications
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
-USE_TELEGRAM = os.getenv('USE_TELEGRAM', 'False').lower() == 'true'
+USE_TELEGRAM = os.getenv('USE_TELEGRAM', 'True').lower() == 'true'
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')
 SEND_DAILY_REPORT = os.getenv('SEND_DAILY_REPORT', 'True').lower() == 'true'

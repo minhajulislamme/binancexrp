@@ -77,8 +77,47 @@ cd /home/minhajulislam/binancebot && python3 main.py --backtest --symbol XRPUSDT
 python3 main.py --backtest --symbol SOLUSDT --timeframe 15m --strategy XRPDynamicGrid --start-date "30 days ago"
 
 
+
+
+# Binance API credentials (required)
+# Replace with your real Binance API credentials
+# BINANCE_API_KEY=bb0ba32b12f6188db14096d2b2e4c1bc43592b2e265b5fd2ca81d5df56316884
+# BINANCE_API_SECRET=7d95dcd173e0e24eef369713fa716ff04a23cf3de5ec42e0470365ab32fac237
+
+# API Base URLs and Settings
+# Testnet environment settings
+# BINANCE_API_URL=https://testnet.binancefuture.com
+# BINANCE_API_TESTNET=True
+# BINANCE_RECV_WINDOW=10000
+
+# BINANCE_API_KEY=TdLTKb9znqCF1WX3RJVrhtcE15j5KXNT9RHYwJaAgC6O0vZahJyjoG6d34L9Kz5o
+# BINANCE_API_SECRET=46ebfWGD9S1wxoF19G4ZawlBcr9353Ybg6I24OGqAfncK9XxQVH6oo9cwqnZdfRj
+
+BINANCE_API_KEY=TdLTKb9znqCF1WX3RJVrhtcE15j5KXNT9RHYwJaAgC6O0vZahJyjoG6d34L9Kz5o
+BINANCE_API_SECRET=46ebfWGD9S1wxoF19G4ZawlBcr9353Ybg6I24OGqAfncK9XxQVH6oo9cwqnZdfRj
+
+# WuFFXKzm7EHkG7aDkGOocKs0RU12Z5ZEodAaDZEtcxpUjwon300WPWBp3mCkFouu
+
+# kPqa7fmOnPg4FaNFXbRd6ZZxf67jgoJDQTKbiQIt3y6MSUud0oCDAPnu1cqsIQM3
+
+# TdLTKb9znqCF1WX3RJVrhtcE15j5KXNT9RHYwJaAgC6O0vZahJyjoG6d34L9Kz5o
+
+# 46ebfWGD9S1wxoF19G4ZawlBcr9353Ybg6I24OGqAfncK9XxQVH6oo9cwqnZdfRj
+
+
+# API Base URLs and Settings
+# Production environment settings
+BINANCE_API_URL=https://fapi.binance.com
+BINANCE_API_TESTNET=False
+BINANCE_RECV_WINDOW=10000
+
+
 check my main .py than tell me now to excute trade like one positon buy close and other position open sell and sell close open buy
 
+
+
+python3 main.py --backtest --symbol XRPUSDT --strategy XRPDynamicGrid
+python3 main.py --backtest --symbol LAYERUSDT --strategy LayerDynamicGrid
 
 
 but i get notification but not place position
